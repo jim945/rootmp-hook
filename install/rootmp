@@ -1,0 +1,14 @@
+post_install() 
+{
+  echo "To use this hook for rootmp add hook rootmp "
+}
+
+post_upgrade() 
+{
+  echo "To use this hook for rootmp add hook rootmp "
+}
+
+post_remove() 
+{
+  echo "remember to remove rootmp from your mkinitcpio hooks array if you added it"
+}

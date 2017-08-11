@@ -1,0 +1,99 @@
+#!/usr/bin/ash
+
+# args: mem_size, workroot
+_mnt_ram() {
+    local mem_size="${1}"
+    local mnt="${2}"
+
+     if [[ "${zram}" ]]; then
+		if [[ "${mem_size:$((${#mem_size}-1)):1}" == "%" ]]; then
+			mem_size="$((${mem_size%\%}*$(free -m | awk '/Mem/ {print int($2)}')/100))M"
+		fi
+		modprobe zram num_devices=$(($(nproc)+2))
+		zram_dev=$(zramctl -f -s ${mem_size} -a "${zram}" -t $(nproc))
+		mkfs.ext4 -L tmp -m 0 -O ^huge_file,sparse_super,extent,^uninit_bg,dir_nlink,extra_isize,^has_journal -E discard "${zram_dev}" 1>/dev/null
+		tune2fs -c 0 -i 0 -m 0 "${zram_dev}" 1>/dev/null
+		mount -o discard "${zram_dev}" /run/rootmp/"${mnt}"
+    else
+        mount -t tmpfs -o size="${mem_size}",mode=0755 $mnt /run/rootmp/"${mnt}"
+    fi
+}
+
+# args: source, newroot
+_mnt_overlayfs() {
+    local src="${1}"
+    local newroot="${2}"
+    
+    mkdir -p /run/rootmp/cowspace/upperdir /run/rootmp/cowspace/workdir
+    mount -t overlay -o lowerdir=${src},upperdir=/run/rootmp/cowspace/upperdir,workdir=/run/rootmp/cowspace/workdir rootfs "${newroot}"/
+}
+
+# args: device, mountpoint, flags
+_mnt_dev() {
+    local dev="${1}"
+    local mnt="${2}"
+    local flg="${3}"
+
+    mkdir -p "${mnt}"
+
+    msg ":: Mounting '${dev}' to '${mnt}'"
+
+    while ! poll_device "${dev}" 30; do
+        echo "ERROR: '${dev}' device did not show up after 30 seconds..."
+        echo "   Falling back to interactive prompt"
+        echo "   You can try to fix the problem manually, log out when you are finished"
+        launch_interactive_shell
+    done
+
+    if mount "${flg}" "${dev}" "${mnt}"; then
+        msg ":: Device '${dev}' mounted successfully."
+    else
+        echo "ERROR; Failed to mount '${dev}'"
+        echo "   Falling back to interactive prompt"
+        echo "   You can try to fix the problem manually, log out when you are finished"
+        launch_interactive_shell
+    fi
+}
+
+run_hook() {
+    if [[ "${overlay}" || "${copytoram}" ]]; then
+        [[ "${copytoram}" == "y" ]] && copytoram="75%"
+        [[ "${overlay}" == "y" ]] && overlay="50%"
+        [[ "${zram}"  == "y" ]] && zram="lzo"           #lzo or lz4
+
+    # set mount handler for rootmp
+    mount_handler="rootmp_mount_handler"
+    
+    fi
+}
+
+# This function is called normally from init script, but it can be called
+# as chain from other mount handlers.
+# args: /path/to/newroot
+rootmp_mount_handler() {
+    local newroot="${1}"
+
+    _mnt_dev ${root}  "/run/rootmp/rootfs" "-r"
+
+    if [[ "${copytoram}" ]]; then
+        msg ":: Mounting copytoram, size=${copytoram}"
+        mkdir -p /run/rootmp/copytoram
+        _mnt_ram "${copytoram}" "copytoram"
+        msg ":: Copying files in ram"
+        rsync -HaXE /run/rootmp/rootfs/ /run/rootmp/copytoram/
+        umount /run/rootmp/rootfs
+        workroot=/run/rootmp/copytoram
+    else
+        workroot=/run/rootmp/rootfs
+    fi
+
+    if [[ "${overlay}" ]]; then
+        msg ":: Mounting overlayfs, size=${overlay}..."
+        mkdir -p /run/rootmp/cowspace
+        _mnt_ram "${overlay}" "cowspace"
+        _mnt_overlayfs "${workroot}" "${newroot}"
+    else
+        mount --bind "${workroot}" "${newroot}"
+    fi
+}
+
